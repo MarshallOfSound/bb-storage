@@ -263,6 +263,25 @@ func TestChunkFromTrustedEncoded(t *testing.T) {
 		require.Equal(t, codes.InvalidArgument, status.Code(err))
 	})
 
+	t.Run("ZSTDTrailingData", func(t *testing.T) {
+		// Data that announces the right size, but carries a
+		// skippable frame at the end. It is decompressed
+		// immediately, as it must not be relayed without having
+		// been looked at. A corrupted copy is therefore
+		// rejected at creation time.
+		compressed := append(zstd.Encode(data), 0x50, 0x2a, 0x4d, 0x18, 0x02, 0x00, 0x00, 0x00, 'H', 'i')
+		c, err := chunk.NewChunkFromTrustedEncoded(compressed, len(data), remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.Equal(t, data, util.Must(c.GetBytes()))
+
+		corrupted := append([]byte(nil), compressed...)
+		for i := 12; i < len(corrupted)-10; i++ {
+			corrupted[i] ^= 0xff
+		}
+		_, err = chunk.NewChunkFromTrustedEncoded(corrupted, len(data), remoteexecution.Compressor_ZSTD)
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+	})
+
 	t.Run("ZSTDDecodeFailure", func(t *testing.T) {
 		_, err := chunk.NewChunkFromTrustedEncoded([]byte("not valid zstd data"), 100, remoteexecution.Compressor_ZSTD)
 		require.Error(t, err)

@@ -184,20 +184,29 @@ func NewChunkFromUntrustedEncoded(encodedData []byte, maximumDecodedSizeBytes in
 // without decompressing it, ZSTD data is only decompressed lazily if
 // its frame header announces the size of the decompressed data. If the
 // announced size is incorrect, decompression fails.
+//
+// Because lazily decompressed chunks may be handed out to others
+// without ever having been decompressed by us, laziness is furthermore
+// limited to data that is structurally sound: exactly one ZSTD frame
+// of bounded size that does not carry any trailing data (see
+// zstd.IsReusableFrame()). Frames created by zstd.Encode() always meet
+// these requirements. Any other data is decompressed immediately.
 func NewChunkFromTrustedEncoded(encodedData []byte, sizeBytes int, compressor remoteexecution.Compressor_Value) (*Chunk, error) {
 	if compressor == remoteexecution.Compressor_ZSTD {
 		if frameContentSize, ok := zstd.GetFrameContentSize(encodedData); ok {
 			if frameContentSize != uint64(sizeBytes) {
 				return nil, status.Errorf(codes.InvalidArgument, "Size mismatch, expected %d bytes, got %d bytes", sizeBytes, frameContentSize)
 			}
-			c := &Chunk{lazy: &lazyData{sizeBytes: sizeBytes}}
-			c.zstdData.Store(&encodedData)
-			return c, nil
+			if zstd.IsReusableFrame(encodedData, sizeBytes) {
+				c := &Chunk{lazy: &lazyData{sizeBytes: sizeBytes}}
+				c.zstdData.Store(&encodedData)
+				return c, nil
+			}
 		}
 	}
 
-	// Uncompressed data, or ZSTD data whose size cannot be
-	// determined without decompressing it.
+	// Uncompressed data, or ZSTD data that cannot be validated
+	// without decompressing it.
 	c, err := NewChunkFromEncoded(encodedData, sizeBytes, compressor)
 	if err != nil {
 		return nil, err
