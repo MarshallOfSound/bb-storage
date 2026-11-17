@@ -23,6 +23,7 @@ type csBlobAccess struct {
 	capabilitiesClient              remoteexecution.CapabilitiesClient
 	supportedCompressors            atomic.Pointer[[]remoteexecution.Compressor_Value]
 	preferCompression               bool
+	skipDigestVerification          bool
 }
 
 // NewCSBlobAccess creates a BlobAccess handle that relays any requests
@@ -33,11 +34,17 @@ type csBlobAccess struct {
 //
 // If preferCompression is true, the client will use ZSTD compression
 // for operations if the server supports it.
-func NewCSBlobAccess(client grpc.ClientConnInterface, preferCompression bool) blobstore.BlobAccess[*chunk.Chunk] {
+//
+// If skipDigestVerification is true, chunks returned by the server are
+// only checked against their expected size, not rehashed. This should
+// only be used if the server is trusted to have verified the chunks
+// itself, and the connection to it is integrity protected.
+func NewCSBlobAccess(client grpc.ClientConnInterface, preferCompression, skipDigestVerification bool) blobstore.BlobAccess[*chunk.Chunk] {
 	return &csBlobAccess{
 		contentAddressableStorageClient: remoteexecution.NewContentAddressableStorageClient(client),
 		capabilitiesClient:              remoteexecution.NewCapabilitiesClient(client),
 		preferCompression:               preferCompression,
+		skipDigestVerification:          skipDigestVerification,
 	}
 }
 
@@ -99,7 +106,11 @@ func (ba *csBlobAccess) Get(ctx context.Context, digest digest.Digest) (*chunk.C
 		return nil, util.StatusWrapWithCode(err, codes.Internal, "Failed to decode upstream response")
 	}
 
-	if actualDigest := c.ComputeDigest(digestFunction); actualDigest != digest {
+	if ba.skipDigestVerification {
+		if actualSizeBytes := int64(len(c.GetBytes())); actualSizeBytes != digest.GetSizeBytes() {
+			return nil, status.Errorf(codes.Internal, "Size mismatch, expected %d bytes, got %d bytes", digest.GetSizeBytes(), actualSizeBytes)
+		}
+	} else if actualDigest := c.ComputeDigest(digestFunction); actualDigest != digest {
 		return nil, status.Errorf(codes.Internal, "Digest mismatch, expected %s, got %s", digest.String(), actualDigest.String())
 	}
 

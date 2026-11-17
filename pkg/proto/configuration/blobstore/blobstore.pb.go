@@ -1721,11 +1721,12 @@ func (x *DeadlineEnforcingBlobAccess) GetBackend() *BlobAccessConfiguration {
 }
 
 type GrpcBlobAccessConfiguration struct {
-	state             protoimpl.MessageState    `protogen:"open.v1"`
-	Client            *grpc.ClientConfiguration `protobuf:"bytes,1,opt,name=client,proto3" json:"client,omitempty"`
-	EnableCompression bool                      `protobuf:"varint,2,opt,name=enable_compression,json=enableCompression,proto3" json:"enable_compression,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state                       protoimpl.MessageState    `protogen:"open.v1"`
+	Client                      *grpc.ClientConfiguration `protobuf:"bytes,1,opt,name=client,proto3" json:"client,omitempty"`
+	EnableCompression           bool                      `protobuf:"varint,2,opt,name=enable_compression,json=enableCompression,proto3" json:"enable_compression,omitempty"`
+	SkipChunkDigestVerification bool                      `protobuf:"varint,3,opt,name=skip_chunk_digest_verification,json=skipChunkDigestVerification,proto3" json:"skip_chunk_digest_verification,omitempty"`
+	unknownFields               protoimpl.UnknownFields
+	sizeCache                   protoimpl.SizeCache
 }
 
 func (x *GrpcBlobAccessConfiguration) Reset() {
@@ -1768,6 +1769,13 @@ func (x *GrpcBlobAccessConfiguration) GetClient() *grpc.ClientConfiguration {
 func (x *GrpcBlobAccessConfiguration) GetEnableCompression() bool {
 	if x != nil {
 		return x.EnableCompression
+	}
+	return false
+}
+
+func (x *GrpcBlobAccessConfiguration) GetSkipChunkDigestVerification() bool {
+	if x != nil {
+		return x.SkipChunkDigestVerification
 	}
 	return false
 }
@@ -2164,10 +2172,11 @@ const file_github_com_buildbarn_bb_storage_pkg_proto_configuration_blobstore_blo
 	"\x05value\x18\x02 \x01(\v2:.buildbarn.configuration.blobstore.BlobAccessConfigurationR\x05value:\x028\x01\"\xa8\x01\n" +
 	"\x1bDeadlineEnforcingBlobAccess\x123\n" +
 	"\atimeout\x18\x01 \x01(\v2\x19.google.protobuf.DurationR\atimeout\x12T\n" +
-	"\abackend\x18\x02 \x01(\v2:.buildbarn.configuration.blobstore.BlobAccessConfigurationR\abackend\"\x97\x01\n" +
+	"\abackend\x18\x02 \x01(\v2:.buildbarn.configuration.blobstore.BlobAccessConfigurationR\abackend\"\xdc\x01\n" +
 	"\x1bGrpcBlobAccessConfiguration\x12I\n" +
 	"\x06client\x18\x01 \x01(\v21.buildbarn.configuration.grpc.ClientConfigurationR\x06client\x12-\n" +
-	"\x12enable_compression\x18\x02 \x01(\bR\x11enableCompression\"\x85\x01\n" +
+	"\x12enable_compression\x18\x02 \x01(\bR\x11enableCompression\x12C\n" +
+	"\x1eskip_chunk_digest_verification\x18\x03 \x01(\bR\x1bskipChunkDigestVerification\"\x85\x01\n" +
 	"-ChunkMappingValidatingBlobAccessConfiguration\x12T\n" +
 	"\abackend\x18\x01 \x01(\v2:.buildbarn.configuration.blobstore.BlobAccessConfigurationR\abackendBCZAgithub.com/buildbarn/bb-storage/pkg/proto/configuration/blobstoreb\x06proto3"
 
