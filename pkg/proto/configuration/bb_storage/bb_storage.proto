@@ -143,6 +143,46 @@ message ContentAddressableStorageServerConfiguration {
   // Recommended value: 100000 (corresponds to approximately 32GiB at a
   // 256KiB min_chunk_size_bytes).
   int64 maximum_chunk_count = 5;
+
+  // When a client uploads a blob that fits in a single chunk through
+  // BatchUpdateBlobs() using ZSTD compression, the server decompresses
+  // it and validates its digest. By default the compressed data
+  // provided by the client is then discarded, and the chunk is
+  // compressed again whenever a compressed representation is needed
+  // (e.g., when forwarding it to a storage backend that has
+  // 'enable_compression' set, or when writing it into local storage).
+  // This ensures that the quality of what is stored does not depend on
+  // the client, at the cost of compressing all data that is uploaded.
+  //
+  // When this option is enabled, the compressed data provided by the
+  // client is retained and used as the chunk's compressed
+  // representation, provided that after having been decompressed and
+  // validated against the digest, all of the following hold:
+  //
+  // - It consists of exactly one ZSTD frame, without any skippable
+  //   frames or other trailing data.
+  // - The frame does not use a dictionary or any reserved features.
+  // - The frame's window size is at most 8 MiB.
+  // - The frame content size, if present, matches the size of the blob.
+  // - The frame is not meaningfully larger than the blob itself.
+  //
+  // Data that does not meet these requirements is still accepted, but
+  // compressed again as if this option were disabled.
+  //
+  // The digest of a blob is always computed over its decompressed
+  // contents. Enabling this option therefore does not allow clients to
+  // store data that does not match its digest. It does mean that the
+  // compression ratio of stored chunks is up to the client, bounded by
+  // the size of the uncompressed data, and that other clients may be
+  // served ZSTD frames that were created by a different encoder than
+  // the one built into this server.
+  //
+  // This option only affects the server on which it is set. A server
+  // that forwards chunks to other servers (e.g., a frontend in front
+  // of storage shards) only uses retained frames for forwarding; the
+  // servers receiving them validate and by default recompress them
+  // again.
+  bool reuse_client_zstd_frames = 6;
 }
 
 // Storage configuration for backends which don't allow batch digest
