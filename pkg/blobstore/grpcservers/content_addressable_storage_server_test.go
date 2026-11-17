@@ -15,6 +15,7 @@ import (
 	"github.com/buildbarn/bb-storage/pkg/blobstore/grpcservers"
 	"github.com/buildbarn/bb-storage/pkg/digest"
 	"github.com/buildbarn/bb-storage/pkg/testutil"
+	"github.com/buildbarn/bb-storage/pkg/util"
 	"github.com/buildbarn/bb-storage/pkg/zstd"
 	klauspost_zstd "github.com/klauspost/compress/zstd"
 	"github.com/stretchr/testify/require"
@@ -200,14 +201,14 @@ func TestContentAddressableStorageServerBatchUpdateBlobs(t *testing.T) {
 		if !ok {
 			return false
 		}
-		return bytes.Equal(chunk.GetBytes(), []byte("Hello"))
+		return bytes.Equal(util.Must(chunk.GetBytes()), []byte("Hello"))
 	})).Return(nil)
 	chunkStorage.EXPECT().Put(ctx, digest2, gomock.Cond(func(x any) bool {
 		chunk, ok := x.(*chunk.Chunk)
 		if !ok {
 			return false
 		}
-		return bytes.Equal(chunk.GetBytes(), []byte("World"))
+		return bytes.Equal(util.Must(chunk.GetBytes()), []byte("World"))
 	})).Return(status.Error(codes.Internal, "Hard disk has a case of the Mondays"))
 
 	contentAddressableStorageServer := grpcservers.NewContentAddressableStorageServer(chunkStorage, chunkMappingStorage, cdcParametersFetcher, readerPutter, allowAllAuthorizer, allowAllAuthorizer, 4<<20, 1000, false)
@@ -397,7 +398,7 @@ func TestContentAddressableStorageServerBatchUpdateBlobsReuseClientZSTDFrames(t 
 		if expectPut != nil {
 			chunkStorage.EXPECT().Put(ctx, digest1, gomock.Any()).DoAndReturn(
 				func(ctx context.Context, d digest.Digest, c *chunk.Chunk) error {
-					require.Equal(t, data, c.GetBytes())
+					require.Equal(t, data, util.Must(c.GetBytes()))
 					expectPut(c)
 					return nil
 				},

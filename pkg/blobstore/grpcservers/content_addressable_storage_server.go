@@ -300,7 +300,9 @@ func (s *contentAddressableStorageServer) updateChunk(ctx context.Context, d dig
 	default:
 		return status.Errorf(codes.Unimplemented, "This service does not support uploading compression type: %s", compressor)
 	}
-	if actual := c.ComputeDigest(d.GetDigestFunction()); actual != d {
+	if actual, err := c.ComputeDigest(d.GetDigestFunction()); err != nil {
+		return err
+	} else if actual != d {
 		return status.Errorf(codes.InvalidArgument, "Blob digest mismatch, advertised %s, actual %s", d, actual)
 	}
 	if err := s.chunkStorage.Put(ctx, d, c); err != nil {

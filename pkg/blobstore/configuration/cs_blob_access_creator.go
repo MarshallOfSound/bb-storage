@@ -82,7 +82,7 @@ func (bac *csBlobAccessCreator) NewCustomBlobAccess(terminationGroup program.Gro
 		if err != nil {
 			return BlobAccessInfo[*chunk.Chunk]{}, "", err
 		}
-		ba := grpcclients.NewCSBlobAccess(client, backend.Grpc.EnableCompression)
+		ba := grpcclients.NewCSBlobAccess(client, grpc.EnableCompression, grpc.SkipChunkDigestVerification)
 		// TODO: Should we provide a configuration option, so
 		// that digest.KeyWithoutInstance can be used?
 		return BlobAccessInfo[*chunk.Chunk]{

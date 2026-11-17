@@ -1,6 +1,7 @@
 package grpcclients_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -56,7 +57,7 @@ func TestCSBlobAccessPut(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 
 	client := mock.NewMockClientConnInterface(ctrl)
-	blobAccess := grpcclients.NewCSBlobAccess(client, false)
+	blobAccess := grpcclients.NewCSBlobAccess(client, false, false)
 
 	blobDigest := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", 5)
 
@@ -134,7 +135,7 @@ func TestCSBlobAccessGet(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 
 	client := mock.NewMockClientConnInterface(ctrl)
-	blobAccess := grpcclients.NewCSBlobAccess(client, false)
+	blobAccess := grpcclients.NewCSBlobAccess(client, false, false)
 
 	blobDigest := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", 5)
 
@@ -165,8 +166,18 @@ func TestCSBlobAccessGet(t *testing.T) {
 
 		chunk, err := blobAccess.Get(ctx, blobDigest)
 		require.NoError(t, err)
-		data := chunk.GetBytes()
+		data := util.Must(chunk.GetBytes())
 		require.Equal(t, []byte("Hello"), data)
+	})
+
+	t.Run("DigestMismatch", func(t *testing.T) {
+		expectBatchReadBlobs(ctx, client, blobDigest, []byte("Jello"), remoteexecution.Compressor_IDENTITY)
+
+		_, err := blobAccess.Get(ctx, blobDigest)
+		actualDigest := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "bedad9eef4de4b391cc5aeb8ddbe6387", 5)
+		testutil.RequireEqualStatus(t,
+			status.Errorf(codes.Internal, "Digest mismatch, expected %s, got %s", blobDigest.String(), actualDigest.String()),
+			err)
 	})
 
 	t.Run("InitialFailure", func(t *testing.T) {
@@ -213,7 +224,7 @@ func TestCSBlobAccessGetCapabilities(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 
 	client := mock.NewMockClientConnInterface(ctrl)
-	blobAccess := grpcclients.NewCSBlobAccess(client, false)
+	blobAccess := grpcclients.NewCSBlobAccess(client, false, false)
 
 	t.Run("BackendFailure", func(t *testing.T) {
 		client.EXPECT().Invoke(
@@ -323,7 +334,7 @@ func TestCSBlobAccessPutWithCompression(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 
 	client := mock.NewMockClientConnInterface(ctrl)
-	blobAccess := grpcclients.NewCSBlobAccess(client, true)
+	blobAccess := grpcclients.NewCSBlobAccess(client, true, false)
 
 	expectGetCapabilitiesWithZSTD(client)
 	blobDigest := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "1411ffd5854fa029dc4d231aa89311eb", 1000)
@@ -365,7 +376,7 @@ func TestCSBlobAccessGetWithCompression(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 
 	client := mock.NewMockClientConnInterface(ctrl)
-	blobAccess := grpcclients.NewCSBlobAccess(client, true)
+	blobAccess := grpcclients.NewCSBlobAccess(client, true, false)
 
 	expectGetCapabilitiesWithZSTD(client)
 
@@ -406,8 +417,123 @@ func TestCSBlobAccessGetWithCompression(t *testing.T) {
 
 		chunk, err := blobAccess.Get(ctx, largeDigest)
 		require.NoError(t, err)
-		data := chunk.GetBytes()
+		data := util.Must(chunk.GetBytes())
 		require.Equal(t, expectedData, data)
+	})
+}
+
+func expectBatchReadBlobs(ctx context.Context, client *mock.MockClientConnInterface, blobDigest digest.Digest, data []byte, compressor remoteexecution.Compressor_Value) {
+	client.EXPECT().Invoke(
+		ctx,
+		"/build.bazel.remote.execution.v2.ContentAddressableStorage/BatchReadBlobs",
+		gomock.Any(),
+		gomock.Any(),
+		gomock.Any(),
+	).DoAndReturn(func(ctx context.Context, method string, req, reply interface{}, opts ...grpc.CallOption) error {
+		resp := reply.(*remoteexecution.BatchReadBlobsResponse)
+		resp.Responses = []*remoteexecution.BatchReadBlobsResponse_Response{
+			{
+				Digest:     blobDigest.GetProto(),
+				Data:       data,
+				Status:     status.New(codes.OK, "").Proto(),
+				Compressor: compressor,
+			},
+		}
+		return nil
+	})
+}
+
+func TestCSBlobAccessGetSkipDigestVerification(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	client := mock.NewMockClientConnInterface(ctrl)
+	blobAccess := grpcclients.NewCSBlobAccess(client, true, true)
+
+	expectGetCapabilitiesWithZSTD(client)
+	blobDigest := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", 5)
+
+	t.Run("NotRehashed", func(t *testing.T) {
+		// The server is trusted to have verified the chunk, so
+		// contents that don't match the digest are not detected.
+		expectBatchReadBlobs(ctx, client, blobDigest, []byte("Jello"), remoteexecution.Compressor_IDENTITY)
+
+		chunk, err := blobAccess.Get(ctx, blobDigest)
+		require.NoError(t, err)
+		require.Equal(t, []byte("Jello"), util.Must(chunk.GetBytes()))
+	})
+
+	t.Run("CompressedPassthrough", func(t *testing.T) {
+		// The ZSTD frame sent by the server is retained, so that
+		// it can be returned to clients without recompressing.
+		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+		require.NoError(t, err)
+		compressedData := encoder.EncodeAll([]byte("Hello"), nil)
+		expectBatchReadBlobs(ctx, client, blobDigest, compressedData, remoteexecution.Compressor_ZSTD)
+
+		chunk, err := blobAccess.Get(ctx, blobDigest)
+		require.NoError(t, err)
+		require.Equal(t, []byte("Hello"), util.Must(chunk.GetBytes()))
+		encodedData, err := chunk.GetEncodedBytes(remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.Equal(t, compressedData, encodedData)
+	})
+
+	t.Run("CompressedNotDecoded", func(t *testing.T) {
+		// Compressed chunks are not decompressed unless their
+		// uncompressed contents are requested. A chunk whose
+		// frame is corrupted can therefore still be relayed in
+		// compressed form, but not be read.
+		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+		require.NoError(t, err)
+		data := bytes.Repeat([]byte("Hello"), 1000)
+		largerDigest := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", int64(len(data)))
+		compressedData := encoder.EncodeAll(data, nil)
+		for i := 12; i < len(compressedData); i++ {
+			compressedData[i] ^= 0xff
+		}
+		expectBatchReadBlobs(ctx, client, largerDigest, compressedData, remoteexecution.Compressor_ZSTD)
+
+		chunk, err := blobAccess.Get(ctx, largerDigest)
+		require.NoError(t, err)
+		encodedData, err := chunk.GetEncodedBytes(remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.Equal(t, compressedData, encodedData)
+		_, err = chunk.GetBytes()
+		require.Equal(t, codes.Internal, status.Code(err))
+	})
+
+	t.Run("SizeMismatch", func(t *testing.T) {
+		// Truncated chunks are still rejected.
+		expectBatchReadBlobs(ctx, client, blobDigest, []byte("Hell"), remoteexecution.Compressor_IDENTITY)
+
+		_, err := blobAccess.Get(ctx, blobDigest)
+		testutil.RequireEqualStatus(t,
+			status.Error(codes.Internal, "Failed to decode upstream response: Size mismatch, expected 5 bytes, got 4 bytes"),
+			err)
+	})
+
+	t.Run("CompressedSizeMismatch", func(t *testing.T) {
+		// The same holds for compressed chunks that decompress
+		// to fewer bytes than expected.
+		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+		require.NoError(t, err)
+		expectBatchReadBlobs(ctx, client, blobDigest, encoder.EncodeAll([]byte("Hell"), nil), remoteexecution.Compressor_ZSTD)
+
+		_, err = blobAccess.Get(ctx, blobDigest)
+		testutil.RequireEqualStatus(t,
+			status.Error(codes.Internal, "Failed to decode upstream response: Size mismatch, expected 5 bytes, got 4 bytes"),
+			err)
+	})
+
+	t.Run("CompressedTooLarge", func(t *testing.T) {
+		// Chunks that decompress to more bytes than expected
+		// are rejected while decompressing.
+		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+		require.NoError(t, err)
+		expectBatchReadBlobs(ctx, client, blobDigest, encoder.EncodeAll([]byte("Hello world"), nil), remoteexecution.Compressor_ZSTD)
+
+		_, err = blobAccess.Get(ctx, blobDigest)
+		require.Equal(t, codes.Internal, status.Code(err))
 	})
 }
 
@@ -415,7 +541,7 @@ func TestCSBlobAccessFindMissing(t *testing.T) {
 	ctrl, ctx := gomock.WithContext(context.Background(), t)
 
 	client := mock.NewMockClientConnInterface(ctrl)
-	blobAccess := grpcclients.NewCSBlobAccess(client, false)
+	blobAccess := grpcclients.NewCSBlobAccess(client, false, false)
 
 	digest1 := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", 5)
 	digest2 := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "1411ffd5854fa029dc4d231aa89311eb", 1000)

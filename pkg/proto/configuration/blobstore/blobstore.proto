@@ -946,6 +946,28 @@ message GrpcBlobAccessConfiguration {
   // used if the server supports it. Has no effect for other storage
   // types (AC, ICAS, etc.).
   bool enable_compression = 2;
+
+  // Only applies to the Chunk Storage (CS). By default, the digest of
+  // every chunk returned by the server is recomputed and compared
+  // against the requested digest. When enabled, chunks are only
+  // checked against their expected size. Compressed chunks are
+  // furthermore not decompressed until their uncompressed contents are
+  // needed, meaning that they can be relayed to clients that request
+  // compressed data without being decompressed at all.
+  //
+  // Only enable this if the server verifies chunks before returning
+  // them, and the connection to it is authenticated and integrity
+  // protected (e.g., mTLS). A bb_storage server whose chunks are
+  // stored in a "local" backend does this, as it decompresses and
+  // rehashes every chunk it reads. On a frontend relaying reads from
+  // such storage shards, this avoids decompressing and hashing every
+  // byte twice.
+  //
+  // Do not enable this on clients that act upon the contents of chunks
+  // themselves (e.g., workers), or that access a server that is not
+  // fully trusted, as corrupted or malicious data returned by the
+  // server would go unnoticed.
+  bool skip_chunk_digest_verification = 3;
 }
 
 message ChunkMappingValidatingBlobAccessConfiguration {
