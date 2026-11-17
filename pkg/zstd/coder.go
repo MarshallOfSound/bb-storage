@@ -100,10 +100,12 @@ func Encode(data []byte) []byte {
 
 	tmp := coderEncoder.EncodeAll(data, (*scratch)[:0])
 
-	result := make([]byte, len(tmp))
-	copy(result, tmp)
+	// Use append() instead of make() and copy(), as the former does
+	// not zero initialize memory that is overwritten immediately
+	// after.
+	result := append([]byte(nil), tmp...)
 	scratchPool.Put(scratch)
-	return result
+	return result[:len(result):len(result)]
 }
 
 // Decode decodes the provided data into a newly allocated byte slice of
