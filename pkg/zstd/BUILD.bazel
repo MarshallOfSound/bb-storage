@@ -6,6 +6,7 @@ go_library(
         "bounded_pool.go",
         "coder.go",
         "configuration.go",
+        "frame.go",
         "metrics_pool.go",
         "pool.go",
         "read_closer.go",
@@ -30,6 +31,7 @@ go_test(
     srcs = [
         "bounded_pool_test.go",
         "coder_test.go",
+        "frame_test.go",
     ],
     deps = [
         ":zstd",

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"sync"
 
 	remoteexecution "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/buildbarn/bb-storage/pkg/auth"
@@ -16,9 +17,27 @@ import (
 	"github.com/buildbarn/bb-storage/pkg/digest"
 	"github.com/buildbarn/bb-storage/pkg/util"
 	"github.com/buildbarn/bb-storage/pkg/zstd"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+)
+
+var (
+	contentAddressableStorageServerPrometheusMetrics sync.Once
+
+	contentAddressableStorageServerZSTDFramesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "buildbarn",
+			Subsystem: "blobstore",
+			Name:      "content_addressable_storage_server_zstd_frames_total",
+			Help:      "Number of ZSTD compressed chunks received through BatchUpdateBlobs(), and whether the compressed data provided by the client was reused, rejected for reuse or compressed again because reuse is disabled.",
+		},
+		[]string{"outcome"},
+	)
+	contentAddressableStorageServerZSTDFramesTotalReused        = contentAddressableStorageServerZSTDFramesTotal.WithLabelValues("reused")
+	contentAddressableStorageServerZSTDFramesTotalGuardRejected = contentAddressableStorageServerZSTDFramesTotal.WithLabelValues("guard_rejected")
+	contentAddressableStorageServerZSTDFramesTotalReencoded     = contentAddressableStorageServerZSTDFramesTotal.WithLabelValues("reencoded")
 )
 
 type contentAddressableStorageServer struct {
@@ -31,11 +50,21 @@ type contentAddressableStorageServer struct {
 	putChunkMappingAuthorizer auth.Authorizer
 	maximumMessageSizeBytes   int64
 	maximumChunkCount         int
+	reuseClientZSTDFrames     bool
 }
 
 // NewContentAddressableStorageServer creates a GRPC service for serving
 // the contents of a Bazel Content Addressable Storage (CAS) to Bazel.
-func NewContentAddressableStorageServer(chunkStorage blobstore.BlobAccess[*chunk.Chunk], chunkMappingStorage blobstore.BlobAccess[chunk.Mapping], cdcParametersFetcher capabilities.CDCParametersFetcher, readerPutter cas.ReaderPutter, getChunkMappingAuthorizer, putChunkMappingAuthorizer auth.Authorizer, maximumMessageSizeBytes int64, maximumChunkCount int) remoteexecution.ContentAddressableStorageServer {
+//
+// If reuseClientZSTDFrames is true, ZSTD compressed chunks uploaded
+// through BatchUpdateBlobs() retain the compressed data provided by the
+// client, as long as it is safe to do so. This prevents the need for
+// compressing chunks again when they are written into storage.
+func NewContentAddressableStorageServer(chunkStorage blobstore.BlobAccess[*chunk.Chunk], chunkMappingStorage blobstore.BlobAccess[chunk.Mapping], cdcParametersFetcher capabilities.CDCParametersFetcher, readerPutter cas.ReaderPutter, getChunkMappingAuthorizer, putChunkMappingAuthorizer auth.Authorizer, maximumMessageSizeBytes int64, maximumChunkCount int, reuseClientZSTDFrames bool) remoteexecution.ContentAddressableStorageServer {
+	contentAddressableStorageServerPrometheusMetrics.Do(func() {
+		prometheus.MustRegister(contentAddressableStorageServerZSTDFramesTotal)
+	})
+
 	return &contentAddressableStorageServer{
 		chunkStorage:              chunkStorage,
 		chunkMappingStorage:       chunkMappingStorage,
@@ -45,6 +74,7 @@ func NewContentAddressableStorageServer(chunkStorage blobstore.BlobAccess[*chunk
 		putChunkMappingAuthorizer: putChunkMappingAuthorizer,
 		maximumMessageSizeBytes:   maximumMessageSizeBytes,
 		maximumChunkCount:         maximumChunkCount,
+		reuseClientZSTDFrames:     reuseClientZSTDFrames,
 	}
 }
 
@@ -232,25 +262,47 @@ func (s *contentAddressableStorageServer) BatchUpdateBlobs(ctx context.Context, 
 }
 
 func (s *contentAddressableStorageServer) updateChunk(ctx context.Context, d digest.Digest, data []byte, compressor remoteexecution.Compressor_Value) error {
-	var decompressedData []byte
+	var c *chunk.Chunk
 	switch compressor {
 	case remoteexecution.Compressor_IDENTITY:
-		decompressedData = data
+		c = chunk.NewChunk(data)
 	case remoteexecution.Compressor_ZSTD:
-		var err error
-		if decompressedData, err = zstd.Decode(data, int(d.GetSizeBytes())); err != nil {
-			return util.StatusWrap(err, "Failed to decompress ZSTD data")
+		if s.reuseClientZSTDFrames {
+			// Retain the compressed data provided by the
+			// client, so that the chunk does not need to be
+			// compressed again when stored. As the client is
+			// untrusted, this is only done if the data is
+			// well formed and not arbitrarily poorly
+			// compressed. The digest below is still computed
+			// over the decompressed data.
+			var reused bool
+			var err error
+			if c, reused, err = chunk.NewChunkFromUntrustedEncoded(data, int(d.GetSizeBytes()), compressor); err != nil {
+				return util.StatusWrap(err, "Failed to decompress ZSTD data")
+			}
+			if reused {
+				contentAddressableStorageServerZSTDFramesTotalReused.Inc()
+			} else {
+				contentAddressableStorageServerZSTDFramesTotalGuardRejected.Inc()
+			}
+		} else {
+			// Don't reuse the compression, as it comes from
+			// an untrusted client. Even if it represents the
+			// correct blob it could still be an arbitrarily
+			// poor compression.
+			decompressedData, err := zstd.Decode(data, int(d.GetSizeBytes()))
+			if err != nil {
+				return util.StatusWrap(err, "Failed to decompress ZSTD data")
+			}
+			c = chunk.NewChunk(decompressedData)
+			contentAddressableStorageServerZSTDFramesTotalReencoded.Inc()
 		}
 	default:
 		return status.Errorf(codes.Unimplemented, "This service does not support uploading compression type: %s", compressor)
 	}
-	c := chunk.NewChunk(decompressedData)
 	if actual := c.ComputeDigest(d.GetDigestFunction()); actual != d {
 		return status.Errorf(codes.InvalidArgument, "Blob digest mismatch, advertised %s, actual %s", d, actual)
 	}
-	// We can't reuse the compression here as it comes from an untrusted
-	// client. Even if it represents the correct blob it could still be
-	// an arbitrarily poor compression.
 	if err := s.chunkStorage.Put(ctx, d, c); err != nil {
 		return util.StatusWrap(err, "Failed to save chunk")
 	}

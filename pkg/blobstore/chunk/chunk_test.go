@@ -88,6 +88,60 @@ func TestChunkFromEncoded(t *testing.T) {
 	})
 }
 
+func TestChunkFromUntrustedEncoded(t *testing.T) {
+	t.Run("Identity", func(t *testing.T) {
+		c, reused, err := chunk.NewChunkFromUntrustedEncoded([]byte("test data"), 100, remoteexecution.Compressor_IDENTITY)
+		require.NoError(t, err)
+		require.False(t, reused)
+		require.Equal(t, []byte("test data"), c.GetBytes())
+	})
+
+	t.Run("ZSTDReused", func(t *testing.T) {
+		// A well formed frame is handed back as is.
+		compressed := zstd.Encode([]byte("test data"))
+		c, reused, err := chunk.NewChunkFromUntrustedEncoded(compressed, 100, remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.True(t, reused)
+		require.Equal(t, []byte("test data"), c.GetBytes())
+
+		encoded, err := c.GetEncodedBytes(remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.Equal(t, compressed, encoded)
+	})
+
+	t.Run("ZSTDNotReused", func(t *testing.T) {
+		// Data that decompresses properly, but has trailing
+		// data in the form of a skippable frame. The chunk must
+		// be encoded again, so that the trailing data is not
+		// handed out to others.
+		compressed := append(zstd.Encode([]byte("test data")), 0x50, 0x2a, 0x4d, 0x18, 0x02, 0x00, 0x00, 0x00, 'H', 'i')
+		c, reused, err := chunk.NewChunkFromUntrustedEncoded(compressed, 100, remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.False(t, reused)
+		require.Equal(t, []byte("test data"), c.GetBytes())
+
+		encoded, err := c.GetEncodedBytes(remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.Equal(t, zstd.Encode([]byte("test data")), encoded)
+	})
+
+	t.Run("ZSTDDecodeFailure", func(t *testing.T) {
+		_, _, err := chunk.NewChunkFromUntrustedEncoded([]byte("not valid zstd data"), 100, remoteexecution.Compressor_ZSTD)
+		require.Error(t, err)
+	})
+
+	t.Run("ZSTDBufferTooLarge", func(t *testing.T) {
+		compressed := zstd.Encode([]byte("test data"))
+		_, _, err := chunk.NewChunkFromUntrustedEncoded(compressed, 4, remoteexecution.Compressor_ZSTD)
+		require.Error(t, err)
+	})
+
+	t.Run("UnsupportedCompressor", func(t *testing.T) {
+		_, _, err := chunk.NewChunkFromUntrustedEncoded([]byte("test data"), 100, remoteexecution.Compressor_DEFLATE)
+		require.Equal(t, codes.Unimplemented, status.Code(err))
+	})
+}
+
 func TestChunkComputeDigest(t *testing.T) {
 	c := chunk.NewChunk([]byte("Hello"))
 

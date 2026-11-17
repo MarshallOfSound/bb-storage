@@ -93,3 +93,29 @@ func NewChunkFromEncoded(encodedData []byte, maximumDecodedSizeBytes int, compre
 		return nil, status.Errorf(codes.Unimplemented, "Chunk does not support compression type: %s", compressor)
 	}
 }
+
+// NewChunkFromUntrustedEncoded is identical to NewChunkFromEncoded,
+// except that it should be used for encoded data that was provided by
+// an untrusted party, such as a client uploading a blob.
+//
+// The encoded data is only retained as the chunk's encoded
+// representation if it is safe to hand out to others as is (see
+// zstd.IsReusableFrame()). If not, it is discarded, causing
+// GetEncodedBytes() to encode the chunk again. The returned boolean
+// value indicates whether the encoded data was retained.
+//
+// As with NewChunkFromEncoded, the caller is still responsible for
+// validating the resulting chunk against its digest.
+func NewChunkFromUntrustedEncoded(encodedData []byte, maximumDecodedSizeBytes int, compressor remoteexecution.Compressor_Value) (*Chunk, bool, error) {
+	c, err := NewChunkFromEncoded(encodedData, maximumDecodedSizeBytes, compressor)
+	if err != nil {
+		return nil, false, err
+	}
+	if compressor != remoteexecution.Compressor_ZSTD {
+		return c, false, nil
+	}
+	if !zstd.IsReusableFrame(encodedData, len(c.data)) {
+		return &Chunk{data: c.data}, false, nil
+	}
+	return c, true, nil
+}

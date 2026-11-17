@@ -167,6 +167,7 @@ type ContentAddressableStorageServerConfiguration struct {
 	PutAuthorizer             *auth.AuthorizerConfiguration                     `protobuf:"bytes,3,opt,name=put_authorizer,json=putAuthorizer,proto3" json:"put_authorizer,omitempty"`
 	FindMissingAuthorizer     *auth.AuthorizerConfiguration                     `protobuf:"bytes,4,opt,name=find_missing_authorizer,json=findMissingAuthorizer,proto3" json:"find_missing_authorizer,omitempty"`
 	MaximumChunkCount         int64                                             `protobuf:"varint,5,opt,name=maximum_chunk_count,json=maximumChunkCount,proto3" json:"maximum_chunk_count,omitempty"`
+	ReuseClientZstdFrames     bool                                              `protobuf:"varint,6,opt,name=reuse_client_zstd_frames,json=reuseClientZstdFrames,proto3" json:"reuse_client_zstd_frames,omitempty"`
 	unknownFields             protoimpl.UnknownFields
 	sizeCache                 protoimpl.SizeCache
 }
@@ -234,6 +235,13 @@ func (x *ContentAddressableStorageServerConfiguration) GetMaximumChunkCount() in
 		return x.MaximumChunkCount
 	}
 	return 0
+}
+
+func (x *ContentAddressableStorageServerConfiguration) GetReuseClientZstdFrames() bool {
+	if x != nil {
+		return x.ReuseClientZstdFrames
+	}
+	return false
 }
 
 type NonScannableBlobAccessConfiguration struct {
@@ -387,13 +395,14 @@ const file_github_com_buildbarn_bb_storage_pkg_proto_configuration_bb_storage_bb
 	"\tzstd_pool\x18\x15 \x01(\v2/.buildbarn.configuration.zstd.PoolConfigurationR\bzstdPool\x1av\n" +
 	"\x0fSchedulersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12M\n" +
-	"\x05value\x18\x02 \x01(\v27.buildbarn.configuration.builder.SchedulerConfigurationR\x05value:\x028\x01J\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x03\x10\x04J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x0f\x10\x10\"\x95\x04\n" +
+	"\x05value\x18\x02 \x01(\v27.buildbarn.configuration.builder.SchedulerConfigurationR\x05value:\x028\x01J\x04\b\x01\x10\x02J\x04\b\x02\x10\x03J\x04\b\x03\x10\x04J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x0f\x10\x10\"\xce\x04\n" +
 	",ContentAddressableStorageServerConfiguration\x12\x89\x01\n" +
 	"\x1bcontent_addressable_storage\x18\x01 \x01(\v2I.buildbarn.configuration.blobstore.ContentAddressableStorageConfigurationR\x19contentAddressableStorage\x12\\\n" +
 	"\x0eget_authorizer\x18\x02 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\rgetAuthorizer\x12\\\n" +
 	"\x0eput_authorizer\x18\x03 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\rputAuthorizer\x12m\n" +
 	"\x17find_missing_authorizer\x18\x04 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\x15findMissingAuthorizer\x12.\n" +
-	"\x13maximum_chunk_count\x18\x05 \x01(\x03R\x11maximumChunkCount\"\xb7\x02\n" +
+	"\x13maximum_chunk_count\x18\x05 \x01(\x03R\x11maximumChunkCount\x127\n" +
+	"\x18reuse_client_zstd_frames\x18\x06 \x01(\bR\x15reuseClientZstdFrames\"\xb7\x02\n" +
 	"#NonScannableBlobAccessConfiguration\x12T\n" +
 	"\abackend\x18\x01 \x01(\v2:.buildbarn.configuration.blobstore.BlobAccessConfigurationR\abackend\x12\\\n" +
 	"\x0eget_authorizer\x18\x02 \x01(\v25.buildbarn.configuration.auth.AuthorizerConfigurationR\rgetAuthorizer\x12\\\n" +

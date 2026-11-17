@@ -228,6 +228,7 @@ func main() {
 						casPutChunkMappingAuthorizer,
 						configuration.MaximumMessageSizeBytes,
 						maximumChunkCount,
+						configuration.ContentAddressableStorageServer.ReuseClientZstdFrames,
 					)
 					remoteexecution.RegisterContentAddressableStorageServer(
 						s,
