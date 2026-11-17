@@ -1,0 +1,225 @@
+[
+ {
+  "name": "00-base-raw",
+  "fe": "base"
+ },
+ {
+  "name": "01-base-zstd",
+  "fe": "base",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "50-specs-all",
+  "fe": "all",
+  "shard": "all",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "60-extras-all",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "61-extras-all-gogc400",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1",
+   "GOGC": "400"
+  },
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "62-base-raw-gogc400",
+  "fe": "base",
+  "env": {
+   "GOGC": "400"
+  }
+ },
+ {
+  "name": "63-extras-raw-client",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  }
+ },
+ {
+  "name": "70-small-base-raw",
+  "fe": "base",
+  "corpus": "c-src.txt"
+ },
+ {
+  "name": "71-small-base-zstd",
+  "fe": "base",
+  "corpus": "c-src.txt",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "72-small-extras-all",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "corpus": "c-src.txt",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "73-small-extras-all-gogc400",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1",
+   "GOGC": "400"
+  },
+  "corpus": "c-src.txt",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "74-small-extras-batch1",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "corpus": "c-src.txt",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024",
+   "-batch_blobs=1"
+  ]
+ },
+ {
+  "name": "80-linkb-base-raw",
+  "fe": "base",
+  "link": "b"
+ },
+ {
+  "name": "81-linkb-base-zstd",
+  "fe": "base",
+  "link": "b",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "82-linkb-extras-all",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "link": "b",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "83-linkb-extras-all-fastest",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "link": "b",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024",
+   "-zstd_level=fastest"
+  ]
+ },
+ {
+  "name": "90-linka-base-raw",
+  "fe": "base",
+  "link": "a"
+ },
+ {
+  "name": "91-linka-base-zstd",
+  "fe": "base",
+  "link": "a",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "92-linka-extras-all",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "link": "a",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024"
+  ]
+ },
+ {
+  "name": "93-linka-extras-all-fastest",
+  "fe": "extras",
+  "shard": "extras",
+  "env": {
+   "FE_SKIP_VERIFY": "1",
+   "FE_REUSE": "1",
+   "SHARD_REUSE": "1"
+  },
+  "link": "a",
+  "client": [
+   "-stream_compress",
+   "-batch_compress=1024",
+   "-zstd_level=fastest"
+  ]
+ }
+]

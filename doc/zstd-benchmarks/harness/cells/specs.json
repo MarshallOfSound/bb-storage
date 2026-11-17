@@ -1,0 +1,14 @@
+[
+ {"name":"00-base-raw", "fe":"base", "client":[]},
+ {"name":"01-base-zstd-client", "fe":"base", "client":["-stream_compress","-batch_compress=1024"]},
+ {"name":"10-spec1-zstd-client", "fe":"all", "client":["-stream_compress","-batch_compress=1024"]},
+ {"name":"20-spec1+2fe", "fe":"all", "env":{"FE_REUSE":"1"}, "client":["-stream_compress","-batch_compress=1024"]},
+ {"name":"21-spec1+2fe-fastest", "fe":"all", "env":{"FE_REUSE":"1"}, "client":["-stream_compress","-batch_compress=1024","-zstd_level=fastest"]},
+ {"name":"22-spec1+2fe+2shard", "fe":"all", "shard":"all", "env":{"FE_REUSE":"1","SHARD_REUSE":"1"}, "client":["-stream_compress","-batch_compress=1024"]},
+ {"name":"23-raw-client+2shard", "fe":"all", "shard":"all", "env":{"SHARD_REUSE":"1"}, "client":[]},
+ {"name":"30-spec6a", "fe":"spec6a", "env":{"FE_SKIP_VERIFY":"1"}, "client":["-stream_compress","-batch_compress=1024"]},
+ {"name":"31-spec6a-raw-client", "fe":"spec6a", "env":{"FE_SKIP_VERIFY":"1"}, "client":[]},
+ {"name":"40-spec6b", "fe":"all", "env":{"FE_SKIP_VERIFY":"1"}, "client":["-stream_compress","-batch_compress=1024"]},
+ {"name":"41-spec6b-raw-client", "fe":"all", "env":{"FE_SKIP_VERIFY":"1"}, "client":[]},
+ {"name":"50-all", "fe":"all", "shard":"all", "env":{"FE_SKIP_VERIFY":"1","FE_REUSE":"1","SHARD_REUSE":"1"}, "client":["-stream_compress","-batch_compress=1024"]}
+]
