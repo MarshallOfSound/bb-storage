@@ -36,9 +36,11 @@ type csBlobAccess struct {
 // for operations if the server supports it.
 //
 // If skipDigestVerification is true, chunks returned by the server are
-// only checked against their expected size, not rehashed. This should
-// only be used if the server is trusted to have verified the chunks
-// itself, and the connection to it is integrity protected.
+// only checked against their expected size, not rehashed. Compressed
+// chunks are furthermore only decompressed when their uncompressed
+// contents are requested. This should only be used if the server is
+// trusted to have verified the chunks itself, and the connection to it
+// is integrity protected.
 func NewCSBlobAccess(client grpc.ClientConnInterface, preferCompression, skipDigestVerification bool) blobstore.BlobAccess[*chunk.Chunk] {
 	return &csBlobAccess{
 		contentAddressableStorageClient: remoteexecution.NewContentAddressableStorageClient(client),
@@ -101,16 +103,26 @@ func (ba *csBlobAccess) Get(ctx context.Context, digest digest.Digest) (*chunk.C
 		return nil, err
 	}
 
+	if ba.skipDigestVerification {
+		// The server is trusted to have verified the chunk. Only
+		// validate its size, and don't decompress it until
+		// somebody requests the uncompressed data. This allows
+		// compressed chunks to be relayed to clients as is.
+		c, err := chunk.NewChunkFromTrustedEncoded(r.Data, int(digest.GetSizeBytes()), r.Compressor)
+		if err != nil {
+			return nil, util.StatusWrapWithCode(err, codes.Internal, "Failed to decode upstream response")
+		}
+		return c, nil
+	}
+
 	c, err := chunk.NewChunkFromEncoded(r.Data, int(digest.GetSizeBytes()), r.Compressor)
 	if err != nil {
 		return nil, util.StatusWrapWithCode(err, codes.Internal, "Failed to decode upstream response")
 	}
 
-	if ba.skipDigestVerification {
-		if actualSizeBytes := int64(len(c.GetBytes())); actualSizeBytes != digest.GetSizeBytes() {
-			return nil, status.Errorf(codes.Internal, "Size mismatch, expected %d bytes, got %d bytes", digest.GetSizeBytes(), actualSizeBytes)
-		}
-	} else if actualDigest := c.ComputeDigest(digestFunction); actualDigest != digest {
+	if actualDigest, err := c.ComputeDigest(digestFunction); err != nil {
+		return nil, err
+	} else if actualDigest != digest {
 		return nil, status.Errorf(codes.Internal, "Digest mismatch, expected %s, got %s", digest.String(), actualDigest.String())
 	}
 

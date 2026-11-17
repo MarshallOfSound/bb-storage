@@ -1,6 +1,7 @@
 package grpcclients_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -165,7 +166,7 @@ func TestCSBlobAccessGet(t *testing.T) {
 
 		chunk, err := blobAccess.Get(ctx, blobDigest)
 		require.NoError(t, err)
-		data := chunk.GetBytes()
+		data := util.Must(chunk.GetBytes())
 		require.Equal(t, []byte("Hello"), data)
 	})
 
@@ -416,7 +417,7 @@ func TestCSBlobAccessGetWithCompression(t *testing.T) {
 
 		chunk, err := blobAccess.Get(ctx, largeDigest)
 		require.NoError(t, err)
-		data := chunk.GetBytes()
+		data := util.Must(chunk.GetBytes())
 		require.Equal(t, expectedData, data)
 	})
 }
@@ -458,7 +459,7 @@ func TestCSBlobAccessGetSkipDigestVerification(t *testing.T) {
 
 		chunk, err := blobAccess.Get(ctx, blobDigest)
 		require.NoError(t, err)
-		require.Equal(t, []byte("Jello"), chunk.GetBytes())
+		require.Equal(t, []byte("Jello"), util.Must(chunk.GetBytes()))
 	})
 
 	t.Run("CompressedPassthrough", func(t *testing.T) {
@@ -471,10 +472,34 @@ func TestCSBlobAccessGetSkipDigestVerification(t *testing.T) {
 
 		chunk, err := blobAccess.Get(ctx, blobDigest)
 		require.NoError(t, err)
-		require.Equal(t, []byte("Hello"), chunk.GetBytes())
+		require.Equal(t, []byte("Hello"), util.Must(chunk.GetBytes()))
 		encodedData, err := chunk.GetEncodedBytes(remoteexecution.Compressor_ZSTD)
 		require.NoError(t, err)
 		require.Equal(t, compressedData, encodedData)
+	})
+
+	t.Run("CompressedNotDecoded", func(t *testing.T) {
+		// Compressed chunks are not decompressed unless their
+		// uncompressed contents are requested. A chunk whose
+		// frame is corrupted can therefore still be relayed in
+		// compressed form, but not be read.
+		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+		require.NoError(t, err)
+		data := bytes.Repeat([]byte("Hello"), 1000)
+		largerDigest := digest.MustNewDigest("hello", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", int64(len(data)))
+		compressedData := encoder.EncodeAll(data, nil)
+		for i := 12; i < len(compressedData); i++ {
+			compressedData[i] ^= 0xff
+		}
+		expectBatchReadBlobs(ctx, client, largerDigest, compressedData, remoteexecution.Compressor_ZSTD)
+
+		chunk, err := blobAccess.Get(ctx, largerDigest)
+		require.NoError(t, err)
+		encodedData, err := chunk.GetEncodedBytes(remoteexecution.Compressor_ZSTD)
+		require.NoError(t, err)
+		require.Equal(t, compressedData, encodedData)
+		_, err = chunk.GetBytes()
+		require.Equal(t, codes.Internal, status.Code(err))
 	})
 
 	t.Run("SizeMismatch", func(t *testing.T) {
@@ -483,7 +508,7 @@ func TestCSBlobAccessGetSkipDigestVerification(t *testing.T) {
 
 		_, err := blobAccess.Get(ctx, blobDigest)
 		testutil.RequireEqualStatus(t,
-			status.Error(codes.Internal, "Size mismatch, expected 5 bytes, got 4 bytes"),
+			status.Error(codes.Internal, "Failed to decode upstream response: Size mismatch, expected 5 bytes, got 4 bytes"),
 			err)
 	})
 
@@ -496,7 +521,7 @@ func TestCSBlobAccessGetSkipDigestVerification(t *testing.T) {
 
 		_, err = blobAccess.Get(ctx, blobDigest)
 		testutil.RequireEqualStatus(t,
-			status.Error(codes.Internal, "Size mismatch, expected 5 bytes, got 4 bytes"),
+			status.Error(codes.Internal, "Failed to decode upstream response: Size mismatch, expected 5 bytes, got 4 bytes"),
 			err)
 	})
 
