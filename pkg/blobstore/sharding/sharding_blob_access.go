@@ -3,6 +3,7 @@ package sharding
 import (
 	"context"
 	"encoding/binary"
+	"sync"
 	"sync/atomic"
 
 	remoteexecution "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -29,11 +30,23 @@ type ShardBackend[T any] struct {
 // NewShardingBlobAccess is an adapter for BlobAccess that partitions
 // requests across backends by hashing the digest. A ShardSelector is
 // used to map hashes to backends.
+//
+// The resulting BlobAccess implements blobstore.BatchBlobAccess if at
+// least one of the backends does. Batches are partitioned by shard,
+// after which the shards are called concurrently.
 func NewShardingBlobAccess[T any](backends []ShardBackend[T], shardSelector ShardSelector) blobstore.BlobAccess[T] {
-	return &shardingBlobAccess[T]{
+	ba := &shardingBlobAccess[T]{
 		backends:      backends,
 		shardSelector: shardSelector,
 	}
+	for _, backend := range backends {
+		if _, ok := backend.Backend.(blobstore.BatchBlobAccess[T]); ok {
+			return &shardingBatchBlobAccess[T]{
+				shardingBlobAccess: ba,
+			}
+		}
+	}
+	return ba
 }
 
 func (ba *shardingBlobAccess[T]) getBackendIndexByDigest(blobDigest digest.Digest) int {
@@ -105,4 +118,130 @@ func (ba *shardingBlobAccess[T]) GetCapabilities(ctx context.Context, instanceNa
 		return nil, util.StatusWrapf(err, "Shard %s", ba.backends[index].Key)
 	}
 	return capabilities, nil
+}
+
+// shardingBatchBlobAccess is used instead of shardingBlobAccess if one
+// or more backends implement blobstore.BatchBlobAccess.
+type shardingBatchBlobAccess[T any] struct {
+	*shardingBlobAccess[T]
+}
+
+// shardBatch contains the objects of a batch that belong to a single
+// shard.
+type shardBatch[T any] struct {
+	backendIndex int
+	indices      []int
+	digests      []digest.Digest
+	values       []T
+}
+
+// partitionBatch partitions the digests of a batch by shard, preserving
+// their order. If all digests belong to the same shard, a single batch
+// is returned that refers to the provided slices.
+func (ba *shardingBatchBlobAccess[T]) partitionBatch(digests []digest.Digest, values []T) []shardBatch[T] {
+	backendIndices := make([]int, 0, len(digests))
+	singleShard := true
+	for _, blobDigest := range digests {
+		backendIndex := ba.getBackendIndexByDigest(blobDigest)
+		backendIndices = append(backendIndices, backendIndex)
+		if backendIndex != backendIndices[0] {
+			singleShard = false
+		}
+	}
+	if singleShard {
+		return []shardBatch[T]{{
+			backendIndex: backendIndices[0],
+			digests:      digests,
+			values:       values,
+		}}
+	}
+
+	batchIndices := make([]int, len(ba.backends))
+	var batches []shardBatch[T]
+	for i, backendIndex := range backendIndices {
+		batchIndex := batchIndices[backendIndex] - 1
+		if batchIndex < 0 {
+			batchIndex = len(batches)
+			batchIndices[backendIndex] = batchIndex + 1
+			batches = append(batches, shardBatch[T]{backendIndex: backendIndex})
+		}
+		batch := &batches[batchIndex]
+		batch.indices = append(batch.indices, i)
+		batch.digests = append(batch.digests, digests[i])
+		if values != nil {
+			batch.values = append(batch.values, values[i])
+		}
+	}
+	return batches
+}
+
+// forEachBatch calls a function for each of the batches. If there are
+// multiple, they are processed concurrently.
+func forEachBatch[T any](batches []shardBatch[T], f func(batch *shardBatch[T])) {
+	var wg sync.WaitGroup
+	for i := 1; i < len(batches); i++ {
+		batch := &batches[i]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f(batch)
+		}()
+	}
+	f(&batches[0])
+	wg.Wait()
+}
+
+func (ba *shardingBatchBlobAccess[T]) wrapBatchErrors(batch *shardBatch[T], errs []error) {
+	for i, err := range errs {
+		if err != nil {
+			errs[i] = util.StatusWrapf(err, "Shard %s", ba.backends[batch.backendIndex].Key)
+		}
+	}
+}
+
+func (ba *shardingBatchBlobAccess[T]) GetBatch(ctx context.Context, digests []digest.Digest) ([]T, []error) {
+	if len(digests) == 0 {
+		return nil, nil
+	}
+	batches := ba.partitionBatch(digests, nil)
+	if len(batches) == 1 {
+		batch := &batches[0]
+		values, errs := blobstore.GetBatch(ctx, ba.backends[batch.backendIndex].Backend, digests)
+		ba.wrapBatchErrors(batch, errs)
+		return values, errs
+	}
+
+	values := make([]T, len(digests))
+	errs := make([]error, len(digests))
+	forEachBatch(batches, func(batch *shardBatch[T]) {
+		batchValues, batchErrs := blobstore.GetBatch(ctx, ba.backends[batch.backendIndex].Backend, batch.digests)
+		ba.wrapBatchErrors(batch, batchErrs)
+		for i, index := range batch.indices {
+			values[index], errs[index] = batchValues[i], batchErrs[i]
+		}
+	})
+	return values, errs
+}
+
+func (ba *shardingBatchBlobAccess[T]) PutBatch(ctx context.Context, digests []digest.Digest, values []T) []error {
+	if len(digests) == 0 {
+		return nil
+	}
+	batches := ba.partitionBatch(digests, values)
+	if len(batches) == 1 {
+		batch := &batches[0]
+		errs := blobstore.PutBatch(ctx, ba.backends[batch.backendIndex].Backend, digests, values)
+		ba.wrapBatchErrors(batch, errs)
+		return errs
+	}
+
+	errs := make([]error, len(digests))
+	forEachBatch(batches, func(batch *shardBatch[T]) {
+		batchErrs := blobstore.PutBatch(ctx, ba.backends[batch.backendIndex].Backend, batch.digests, batch.values)
+		ba.wrapBatchErrors(batch, batchErrs)
+		for i, index := range batch.indices {
+			errs[index] = batchErrs[i]
+		}
+	})
+	return errs
 }

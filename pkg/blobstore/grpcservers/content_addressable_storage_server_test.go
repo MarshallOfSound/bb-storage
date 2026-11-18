@@ -3,6 +3,8 @@ package grpcservers_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
@@ -959,4 +961,215 @@ func TestContentAddressableStorageServerRegisterChunkMappingSizeOverflow(t *test
 	})
 	require.Error(t, err)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+// mockBatchBlobAccess is a BlobAccess that also implements
+// BatchBlobAccess.
+type mockBatchBlobAccess[T any] struct {
+	*mock.MockBlobAccess[T]
+	*mock.MockBatchBlobAccess[T]
+}
+
+func newMockBatchBlobAccess[T any](ctrl *gomock.Controller) mockBatchBlobAccess[T] {
+	return mockBatchBlobAccess[T]{
+		MockBlobAccess:      mock.NewMockBlobAccess[T](ctrl),
+		MockBatchBlobAccess: mock.NewMockBatchBlobAccess[T](ctrl),
+	}
+}
+
+func newBatchTestBlob(sizeBytes int, fill byte) (digest.Digest, []byte) {
+	data := bytes.Repeat([]byte{fill}, sizeBytes)
+	hash := sha256.Sum256(data)
+	return digest.MustNewDigest("ubuntu1804", remoteexecution.DigestFunction_SHA256, hex.EncodeToString(hash[:]), int64(sizeBytes)), data
+}
+
+func TestContentAddressableStorageServerBatchReadBlobsBatchBlobAccess(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	// If the Chunk Storage supports batches, all blobs that are
+	// stored as a single chunk should be requested at once. Empty
+	// blobs and blobs consisting of multiple chunks should not be
+	// part of the batch.
+	digest1, data1 := newBatchTestBlob(123, 'a')
+	digest2, _ := newBatchTestBlob(234, 'b')
+	digestEmpty, _ := newBatchTestBlob(0, 'c')
+	digestLarge, _ := newBatchTestBlob(3000, 'd')
+	digest3, data3 := newBatchTestBlob(345, 'e')
+
+	chunkStorage := newMockBatchBlobAccess[*chunk.Chunk](ctrl)
+	chunkMappingStorage := mock.NewMockBlobAccess[chunk.Mapping](ctrl)
+	cdcParametersFetcher := mock.NewMockCDCParametersFetcher(ctrl)
+	cdcParametersFetcher.EXPECT().FetchCDCParameters(gomock.Any(), mustNewInstanceName("ubuntu1804")).
+		Return(&remoteexecution.RepMaxCdcParams{MinChunkSizeBytes: 1024, HorizonSizeBytes: 2048}, nil)
+	chunkStorage.MockBatchBlobAccess.EXPECT().GetBatch(ctx, []digest.Digest{digest1, digest2, digest3}).Return(
+		[]*chunk.Chunk{chunk.NewChunk(data1), nil, chunk.NewChunk(data3)},
+		[]error{nil, status.Error(codes.NotFound, "The object you requested could not be found"), nil},
+	)
+	chunkMappingStorage.EXPECT().Get(ctx, digestLarge).Return(chunk.Mapping{}, status.Error(codes.NotFound, "Chunk mapping not found"))
+
+	contentAddressableStorageServer := grpcservers.NewContentAddressableStorageServer(chunkStorage, chunkMappingStorage, cdcParametersFetcher, mock.NewMockReaderPutter(ctrl), allowAllAuthorizer, allowAllAuthorizer, 4<<20, 1000, false)
+
+	response, err := contentAddressableStorageServer.BatchReadBlobs(ctx, &remoteexecution.BatchReadBlobsRequest{
+		InstanceName: "ubuntu1804",
+		Digests: []*remoteexecution.Digest{
+			digest1.GetProto(),
+			digest2.GetProto(),
+			digestEmpty.GetProto(),
+			digestLarge.GetProto(),
+			digest3.GetProto(),
+		},
+	})
+	require.NoError(t, err)
+	testutil.RequireEqualProto(t, &remoteexecution.BatchReadBlobsResponse{
+		Responses: []*remoteexecution.BatchReadBlobsResponse_Response{
+			{
+				Digest: digest1.GetProto(),
+				Data:   data1,
+			},
+			{
+				Digest: digest2.GetProto(),
+				Status: &status_pb.Status{
+					Code:    int32(codes.NotFound),
+					Message: "The object you requested could not be found",
+				},
+			},
+			{
+				Digest: digestEmpty.GetProto(),
+			},
+			{
+				Digest: digestLarge.GetProto(),
+				Status: &status_pb.Status{
+					Code:    int32(codes.NotFound),
+					Message: "Chunk mapping not found",
+				},
+			},
+			{
+				Digest: digest3.GetProto(),
+				Data:   data3,
+			},
+		},
+	}, response)
+}
+
+// chunksWithData matches a list of chunks against their expected
+// contents.
+func chunksWithData(expected ...[]byte) gomock.Matcher {
+	return gomock.Cond(func(x any) bool {
+		chunks, ok := x.([]*chunk.Chunk)
+		if !ok || len(chunks) != len(expected) {
+			return false
+		}
+		for i, c := range chunks {
+			if !bytes.Equal(util.Must(c.GetBytes()), expected[i]) {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+func TestContentAddressableStorageServerBatchUpdateBlobsBatchBlobAccess(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	digest1, data1 := newBatchTestBlob(123, 'a')
+	digest2, data2 := newBatchTestBlob(234, 'b')
+	digestEmpty, _ := newBatchTestBlob(0, 'c')
+	digestLarge, dataLarge := newBatchTestBlob(3000, 'd')
+	digest3, data3 := newBatchTestBlob(345, 'e')
+	digest4, data4 := newBatchTestBlob(456, 'f')
+
+	chunkStorage := newMockBatchBlobAccess[*chunk.Chunk](ctrl)
+	chunkMappingStorage := mock.NewMockBlobAccess[chunk.Mapping](ctrl)
+	cdcParametersFetcher := mock.NewMockCDCParametersFetcher(ctrl)
+	params := &remoteexecution.RepMaxCdcParams{MinChunkSizeBytes: 1024, HorizonSizeBytes: 2048}
+	cdcParametersFetcher.EXPECT().FetchCDCParameters(gomock.Any(), mustNewInstanceName("ubuntu1804")).
+		Return(params, nil).AnyTimes()
+	readerPutter := mock.NewMockReaderPutter(ctrl)
+
+	t.Run("SingleBatch", func(t *testing.T) {
+		// All blobs that are stored as a single chunk should be
+		// written at once, except for the ones that are
+		// invalid. Failures to store individual chunks should
+		// only affect the blobs in question.
+		chunkStorage.MockBatchBlobAccess.EXPECT().PutBatch(ctx, []digest.Digest{digest1, digest2, digest4}, chunksWithData(data1, data2, data4)).
+			Return([]error{nil, status.Error(codes.Internal, "Hard disk has a case of the Mondays"), nil})
+		readerPutter.EXPECT().PutReaderAt(ctx, digestLarge, gomock.Any(), testutil.EqProto(t, params)).Return(nil)
+
+		contentAddressableStorageServer := grpcservers.NewContentAddressableStorageServer(chunkStorage, chunkMappingStorage, cdcParametersFetcher, readerPutter, allowAllAuthorizer, allowAllAuthorizer, 4<<20, 1000, false)
+		response, err := contentAddressableStorageServer.BatchUpdateBlobs(ctx, &remoteexecution.BatchUpdateBlobsRequest{
+			InstanceName: "ubuntu1804",
+			Requests: []*remoteexecution.BatchUpdateBlobsRequest_Request{
+				{Digest: digest1.GetProto(), Data: data1},
+				{Digest: digest2.GetProto(), Data: data2},
+				{Digest: digestEmpty.GetProto()},
+				{Digest: digestLarge.GetProto(), Data: dataLarge},
+				// Data that does not match the digest.
+				{Digest: digest3.GetProto(), Data: data3[1:]},
+				{Digest: digest4.GetProto(), Data: data4},
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, response.Responses, 6)
+		testutil.RequireEqualProto(t, &remoteexecution.BatchUpdateBlobsResponse_Response{
+			Digest: digest1.GetProto(),
+		}, response.Responses[0])
+		testutil.RequireEqualProto(t, &remoteexecution.BatchUpdateBlobsResponse_Response{
+			Digest: digest2.GetProto(),
+			Status: &status_pb.Status{
+				Code:    int32(codes.Internal),
+				Message: "Failed to save chunk: Hard disk has a case of the Mondays",
+			},
+		}, response.Responses[1])
+		testutil.RequireEqualProto(t, &remoteexecution.BatchUpdateBlobsResponse_Response{
+			Digest: digestEmpty.GetProto(),
+		}, response.Responses[2])
+		testutil.RequireEqualProto(t, &remoteexecution.BatchUpdateBlobsResponse_Response{
+			Digest: digestLarge.GetProto(),
+		}, response.Responses[3])
+		require.Equal(t, int32(codes.InvalidArgument), response.Responses[4].Status.GetCode())
+		require.Contains(t, response.Responses[4].Status.GetMessage(), "Blob digest mismatch")
+		testutil.RequireEqualProto(t, &remoteexecution.BatchUpdateBlobsResponse_Response{
+			Digest: digest4.GetProto(),
+		}, response.Responses[5])
+	})
+
+	t.Run("SplitOnMaximumMessageSize", func(t *testing.T) {
+		// The total size of the chunks that are gathered
+		// should not exceed the maximum message size, so that
+		// the amount of memory used by a request is bounded,
+		// regardless of how well the data it contains
+		// compresses.
+		gomock.InOrder(
+			chunkStorage.MockBatchBlobAccess.EXPECT().PutBatch(ctx, []digest.Digest{digest1, digest2, digest3}, chunksWithData(data1, data2, data3)).
+				Return([]error{nil, nil, status.Error(codes.Internal, "Hard disk has a case of the Mondays")}),
+			chunkStorage.MockBatchBlobAccess.EXPECT().PutBatch(ctx, []digest.Digest{digest4}, chunksWithData(data4)).
+				Return([]error{nil}),
+		)
+
+		contentAddressableStorageServer := grpcservers.NewContentAddressableStorageServer(chunkStorage, chunkMappingStorage, cdcParametersFetcher, readerPutter, allowAllAuthorizer, allowAllAuthorizer, 1000, 1000, false)
+		response, err := contentAddressableStorageServer.BatchUpdateBlobs(ctx, &remoteexecution.BatchUpdateBlobsRequest{
+			InstanceName: "ubuntu1804",
+			Requests: []*remoteexecution.BatchUpdateBlobsRequest_Request{
+				{Digest: digest1.GetProto(), Data: data1},
+				{Digest: digest2.GetProto(), Data: data2},
+				{Digest: digest3.GetProto(), Data: zstd.Encode(data3), Compressor: remoteexecution.Compressor_ZSTD},
+				{Digest: digest4.GetProto(), Data: data4},
+			},
+		})
+		require.NoError(t, err)
+		testutil.RequireEqualProto(t, &remoteexecution.BatchUpdateBlobsResponse{
+			Responses: []*remoteexecution.BatchUpdateBlobsResponse_Response{
+				{Digest: digest1.GetProto()},
+				{Digest: digest2.GetProto()},
+				{
+					Digest: digest3.GetProto(),
+					Status: &status_pb.Status{
+						Code:    int32(codes.Internal),
+						Message: "Failed to save chunk: Hard disk has a case of the Mondays",
+					},
+				},
+				{Digest: digest4.GetProto()},
+			},
+		}, response)
+	})
 }

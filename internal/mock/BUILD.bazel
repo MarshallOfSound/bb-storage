@@ -51,7 +51,10 @@ gomock(
 gomock(
     name = "blobstore_blobaccess",
     out = "blobstore_blobaccess.go",
-    interfaces = ["BlobAccess"],
+    interfaces = [
+        "BatchBlobAccess",
+        "BlobAccess",
+    ],
     library = "//pkg/blobstore",
     mockgen_tool = "@org_uber_go_mock//mockgen",
     package = "mock",

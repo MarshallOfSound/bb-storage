@@ -29,17 +29,11 @@ import (
 	"cloud.google.com/go/storage"
 )
 
-var csCapabilitiesProvider = capabilities.NewStaticProvider(&remoteexecution.ServerCapabilities{
-	CacheCapabilities: &remoteexecution.CacheCapabilities{
-		DigestFunctions: digest.SupportedDigestFunctions,
-		// MaxBatchTotalSize: Not used by Bazel yet.
-	},
-})
-
 type csBlobAccessCreator struct {
 	csBlobReplicatorCreator
 
 	maximumMessageSizeBytes int
+	capabilitiesProvider    capabilities.Provider
 }
 
 // NewCSBlobAccessCreator creates a BlobAccessCreator that can be
@@ -51,6 +45,20 @@ func NewCSBlobAccessCreator(grpcClientFactory grpc.ClientFactory, maximumMessage
 			grpcClientFactory: grpcClientFactory,
 		},
 		maximumMessageSizeBytes: maximumMessageSizeBytes,
+		capabilitiesProvider: capabilities.NewStaticProvider(&remoteexecution.ServerCapabilities{
+			CacheCapabilities: &remoteexecution.CacheCapabilities{
+				DigestFunctions: digest.SupportedDigestFunctions,
+				// BatchReadBlobs() rejects requests for
+				// more data than the maximum message
+				// size, and requests of BatchUpdateBlobs()
+				// that are larger are rejected by gRPC.
+				// Announcing this limit allows clients
+				// such as grpcclients.NewCSBlobAccess()
+				// to place multiple chunks in a single
+				// request.
+				MaxBatchTotalSizeBytes: int64(maximumMessageSizeBytes),
+			},
+		}),
 	}
 }
 
@@ -58,8 +66,8 @@ func (csBlobAccessCreator) GetBaseDigestKeyFormat() digest.KeyFormat {
 	return digest.KeyWithoutInstance
 }
 
-func (csBlobAccessCreator) GetDefaultCapabilitiesProvider() capabilities.Provider {
-	return csCapabilitiesProvider
+func (bac *csBlobAccessCreator) GetDefaultCapabilitiesProvider() capabilities.Provider {
+	return bac.capabilitiesProvider
 }
 
 func (csBlobAccessCreator) GetBinaryCoder() coder.Coder[*chunk.Chunk, []byte] {

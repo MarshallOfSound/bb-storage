@@ -119,6 +119,9 @@ func (s *contentAddressableStorageServer) FindMissingBlobs(ctx context.Context, 
 	}, nil
 }
 
+// readBlobFromBatch reads a blob that is either empty or consists of
+// multiple chunks. Blobs that are stored as a single chunk are read by
+// BatchReadBlobs() directly.
 func (s *contentAddressableStorageServer) readBlobFromBatch(ctx context.Context, blobDigest digest.Digest, params *remoteexecution.RepMaxCdcParams, compressor remoteexecution.Compressor_Value) ([]byte, error) {
 	if blobDigest.GetSizeBytes() == 0 {
 		switch compressor {
@@ -129,16 +132,6 @@ func (s *contentAddressableStorageServer) readBlobFromBatch(ctx context.Context,
 		default:
 			panic("Unsupported compression algorithm should not be reachable")
 		}
-	}
-	if cas.IsSingleChunk(params, blobDigest) {
-		// Blobs that fit in a single chunk are stored as the
-		// chunk itself. Chunks are immutable, so their data can
-		// be placed in the response without copying it.
-		c, err := s.chunkStorage.Get(ctx, blobDigest)
-		if err != nil {
-			return nil, err
-		}
-		return c.GetEncodedBytes(compressor)
 	}
 	chunkMapping, err := s.chunkMappingStorage.Get(ctx, blobDigest)
 	if err != nil {
@@ -206,8 +199,36 @@ func (s *contentAddressableStorageServer) BatchReadBlobs(ctx context.Context, in
 	if err != nil {
 		return nil, err
 	}
+
+	// Blobs that fit in a single chunk are stored as the chunk
+	// itself. Request all of them from the Chunk Storage at once,
+	// so that backends that support it can fetch them using fewer
+	// requests.
+	var chunkDigests []digest.Digest
+	for _, digest := range digests {
+		if digest.GetSizeBytes() > 0 && cas.IsSingleChunk(params, digest) {
+			chunkDigests = append(chunkDigests, digest)
+		}
+	}
+	var chunks []*chunk.Chunk
+	var chunkErrs []error
+	if len(chunkDigests) > 0 {
+		chunks, chunkErrs = blobstore.GetBatch(ctx, s.chunkStorage, chunkDigests)
+	}
+
 	for i, digest := range digests {
-		data, err := s.readBlobFromBatch(ctx, digest, params, compressor)
+		var data []byte
+		var err error
+		if digest.GetSizeBytes() > 0 && cas.IsSingleChunk(params, digest) {
+			// Chunks are immutable, so their data can be
+			// placed in the response without copying it.
+			if err = chunkErrs[0]; err == nil {
+				data, err = chunks[0].GetEncodedBytes(compressor)
+			}
+			chunks, chunkErrs = chunks[1:], chunkErrs[1:]
+		} else {
+			data, err = s.readBlobFromBatch(ctx, digest, params, compressor)
+		}
 		response.Responses = append(
 			response.Responses,
 			&remoteexecution.BatchReadBlobsResponse_Response{
@@ -242,6 +263,35 @@ func (s *contentAddressableStorageServer) BatchUpdateBlobs(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
+
+	// Blobs that fit in a single chunk are stored as the chunk
+	// itself. Instead of writing these chunks one by one, they are
+	// gathered and written into the Chunk Storage at once, so that
+	// backends that support it can store them using fewer requests.
+	//
+	// As chunks may need to be decompressed to validate them, the
+	// total size of the chunks that are gathered is limited. This
+	// prevents small requests from consuming large amounts of
+	// memory.
+	var pendingResponseIndices []int
+	var pendingDigests []digest.Digest
+	var pendingChunks []*chunk.Chunk
+	var pendingSizeBytes int64
+	flushPendingChunks := func() {
+		if len(pendingDigests) == 0 {
+			return
+		}
+		for i, err := range blobstore.PutBatch(ctx, s.chunkStorage, pendingDigests, pendingChunks) {
+			if err != nil {
+				response.Responses[pendingResponseIndices[i]].Status = status.Convert(util.StatusWrap(err, "Failed to save chunk")).Proto()
+			}
+		}
+		pendingResponseIndices = nil
+		pendingDigests = nil
+		pendingChunks = nil
+		pendingSizeBytes = 0
+	}
+
 	for _, request := range in.Requests {
 		digest, err := digestFunction.NewDigestFromProto(request.Digest)
 		if err == nil {
@@ -251,7 +301,19 @@ func (s *contentAddressableStorageServer) BatchUpdateBlobs(ctx context.Context, 
 			} else if digest.GetSizeBytes() > s.maximumMessageSizeBytes {
 				err = status.Errorf(codes.InvalidArgument, "Attempted to upload blob of %d bytes but this backend only supports uploading blobs up to %d bytes", digest.GetSizeBytes(), s.maximumMessageSizeBytes)
 			} else if cas.IsSingleChunk(params, digest) {
-				err = s.updateChunk(ctx, digest, request.Data, request.Compressor)
+				var c *chunk.Chunk
+				if c, err = s.newChunkFromRequest(digest, request.Data, request.Compressor); err == nil {
+					// The status of the response will
+					// be overwritten if storing the
+					// chunk fails.
+					if len(pendingDigests) > 0 && digest.GetSizeBytes() > s.maximumMessageSizeBytes-pendingSizeBytes {
+						flushPendingChunks()
+					}
+					pendingResponseIndices = append(pendingResponseIndices, len(response.Responses))
+					pendingDigests = append(pendingDigests, digest)
+					pendingChunks = append(pendingChunks, c)
+					pendingSizeBytes += digest.GetSizeBytes()
+				}
 			} else {
 				err = s.updateBlob(ctx, digest, request.Data, request.Compressor, params)
 			}
@@ -262,10 +324,14 @@ func (s *contentAddressableStorageServer) BatchUpdateBlobs(ctx context.Context, 
 				Status: status.Convert(err).Proto(),
 			})
 	}
+	flushPendingChunks()
 	return response, nil
 }
 
-func (s *contentAddressableStorageServer) updateChunk(ctx context.Context, d digest.Digest, data []byte, compressor remoteexecution.Compressor_Value) error {
+// newChunkFromRequest converts the data of a blob that was provided to
+// BatchUpdateBlobs() to a chunk that can be written into the Chunk
+// Storage, verifying that it corresponds to the digest.
+func (s *contentAddressableStorageServer) newChunkFromRequest(d digest.Digest, data []byte, compressor remoteexecution.Compressor_Value) (*chunk.Chunk, error) {
 	var c *chunk.Chunk
 	switch compressor {
 	case remoteexecution.Compressor_IDENTITY:
@@ -282,7 +348,7 @@ func (s *contentAddressableStorageServer) updateChunk(ctx context.Context, d dig
 			var reused bool
 			var err error
 			if c, reused, err = chunk.NewChunkFromUntrustedEncoded(data, int(d.GetSizeBytes()), compressor); err != nil {
-				return util.StatusWrap(err, "Failed to decompress ZSTD data")
+				return nil, util.StatusWrap(err, "Failed to decompress ZSTD data")
 			}
 			if reused {
 				contentAddressableStorageServerZSTDFramesTotalReused.Inc()
@@ -296,23 +362,20 @@ func (s *contentAddressableStorageServer) updateChunk(ctx context.Context, d dig
 			// poor compression.
 			decompressedData, err := zstd.Decode(data, int(d.GetSizeBytes()))
 			if err != nil {
-				return util.StatusWrap(err, "Failed to decompress ZSTD data")
+				return nil, util.StatusWrap(err, "Failed to decompress ZSTD data")
 			}
 			c = chunk.NewChunk(decompressedData)
 			contentAddressableStorageServerZSTDFramesTotalReencoded.Inc()
 		}
 	default:
-		return status.Errorf(codes.Unimplemented, "This service does not support uploading compression type: %s", compressor)
+		return nil, status.Errorf(codes.Unimplemented, "This service does not support uploading compression type: %s", compressor)
 	}
 	if actual, err := c.ComputeDigest(d.GetDigestFunction()); err != nil {
-		return err
+		return nil, err
 	} else if actual != d {
-		return status.Errorf(codes.InvalidArgument, "Blob digest mismatch, advertised %s, actual %s", d, actual)
+		return nil, status.Errorf(codes.InvalidArgument, "Blob digest mismatch, advertised %s, actual %s", d, actual)
 	}
-	if err := s.chunkStorage.Put(ctx, d, c); err != nil {
-		return util.StatusWrap(err, "Failed to save chunk")
-	}
-	return nil
+	return c, nil
 }
 
 func (s *contentAddressableStorageServer) updateBlob(ctx context.Context, d digest.Digest, data []byte, compressor remoteexecution.Compressor_Value, params *remoteexecution.RepMaxCdcParams) error {

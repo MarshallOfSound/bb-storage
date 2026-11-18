@@ -22,11 +22,31 @@ type existenceCachingBlobAccess[T any] struct {
 // This decorator may be useful to run on instances that act as
 // frontends for a mirrored/sharding storage pool, as it may reduce the
 // load observed on the storage pool.
+//
+// The resulting BlobAccess implements BatchBlobAccess if the base
+// BlobAccess does.
 func NewExistenceCachingBlobAccess[T any](base BlobAccess[T], existenceCache *digest.ExistenceCache) BlobAccess[T] {
-	return &existenceCachingBlobAccess[T]{
+	ba := &existenceCachingBlobAccess[T]{
 		BlobAccess:     base,
 		existenceCache: existenceCache,
 	}
+	if batchBase, ok := base.(BatchBlobAccess[T]); ok {
+		// Get() and Put() are forwarded to the base BlobAccess
+		// as is, so the same can be done for batches.
+		return &existenceCachingBatchBlobAccess[T]{
+			existenceCachingBlobAccess: ba,
+			BatchBlobAccess:            batchBase,
+		}
+	}
+	return ba
+}
+
+// existenceCachingBatchBlobAccess is used instead of
+// existenceCachingBlobAccess if the base BlobAccess implements
+// BatchBlobAccess.
+type existenceCachingBatchBlobAccess[T any] struct {
+	*existenceCachingBlobAccess[T]
+	BatchBlobAccess[T]
 }
 
 func (ba *existenceCachingBlobAccess[T]) FindMissing(ctx context.Context, digests digest.Set) (digest.Set, error) {

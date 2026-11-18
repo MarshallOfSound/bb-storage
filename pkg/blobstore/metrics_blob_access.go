@@ -58,6 +58,8 @@ type metricsBlobAccess[T any] struct {
 	getDurationSeconds         prometheus.ObserverVec
 	putBlobSizeBytes           prometheus.Observer
 	putDurationSeconds         prometheus.ObserverVec
+	getBatchDurationSeconds    prometheus.ObserverVec
+	putBatchDurationSeconds    prometheus.ObserverVec
 	findMissingBatchSize       prometheus.Observer
 	findMissingDurationSeconds prometheus.ObserverVec
 	getCapabilitiesSeconds     prometheus.ObserverVec
@@ -65,6 +67,11 @@ type metricsBlobAccess[T any] struct {
 
 // NewMetricsBlobAccess creates an adapter for BlobAccess that adds
 // basic instrumentation in the form of Prometheus metrics.
+//
+// The resulting BlobAccess implements BatchBlobAccess if the provided
+// BlobAccess does. Batches are reported as operations "GetBatch" and
+// "PutBatch", so that their durations don't get mixed up with those of
+// individual objects.
 func NewMetricsBlobAccess[T any](blobAccess BlobAccess[T], clock clock.Clock, storageType, backendType string) BlobAccess[T] {
 	blobAccessOperationsPrometheusMetrics.Do(func() {
 		prometheus.MustRegister(blobAccessOperationsBlobSizeBytes)
@@ -72,7 +79,7 @@ func NewMetricsBlobAccess[T any](blobAccess BlobAccess[T], clock clock.Clock, st
 		prometheus.MustRegister(blobAccessOperationsDurationSeconds)
 	})
 
-	return &metricsBlobAccess[T]{
+	ba := &metricsBlobAccess[T]{
 		blobAccess: blobAccess,
 		clock:      clock,
 
@@ -80,10 +87,19 @@ func NewMetricsBlobAccess[T any](blobAccess BlobAccess[T], clock clock.Clock, st
 		getDurationSeconds:         blobAccessOperationsDurationSeconds.MustCurryWith(map[string]string{"storage_type": storageType, "backend_type": backendType, "operation": "Get"}),
 		putBlobSizeBytes:           blobAccessOperationsBlobSizeBytes.WithLabelValues(storageType, backendType, "Put"),
 		putDurationSeconds:         blobAccessOperationsDurationSeconds.MustCurryWith(map[string]string{"storage_type": storageType, "backend_type": backendType, "operation": "Put"}),
+		getBatchDurationSeconds:    blobAccessOperationsDurationSeconds.MustCurryWith(map[string]string{"storage_type": storageType, "backend_type": backendType, "operation": "GetBatch"}),
+		putBatchDurationSeconds:    blobAccessOperationsDurationSeconds.MustCurryWith(map[string]string{"storage_type": storageType, "backend_type": backendType, "operation": "PutBatch"}),
 		findMissingBatchSize:       blobAccessOperationsFindMissingBatchSize.WithLabelValues(storageType, backendType),
 		findMissingDurationSeconds: blobAccessOperationsDurationSeconds.MustCurryWith(map[string]string{"storage_type": storageType, "backend_type": backendType, "operation": "FindMissing"}),
 		getCapabilitiesSeconds:     blobAccessOperationsDurationSeconds.MustCurryWith(map[string]string{"storage_type": storageType, "backend_type": backendType, "operation": "GetCapabilities"}),
 	}
+	if batchBlobAccess, ok := blobAccess.(BatchBlobAccess[T]); ok {
+		return &metricsBatchBlobAccess[T]{
+			metricsBlobAccess: ba,
+			batchBlobAccess:   batchBlobAccess,
+		}
+	}
+	return ba
 }
 
 func (ba *metricsBlobAccess[T]) updateDurationSeconds(vec prometheus.ObserverVec, code codes.Code, timeStart time.Time) {
@@ -126,4 +142,48 @@ func (ba *metricsBlobAccess[T]) GetCapabilities(ctx context.Context, instanceNam
 	capabilities, err := ba.blobAccess.GetCapabilities(ctx, instanceName)
 	ba.updateDurationSeconds(ba.getCapabilitiesSeconds, status.Code(err), timeStart)
 	return capabilities, err
+}
+
+// metricsBatchBlobAccess is used instead of metricsBlobAccess if the
+// underlying BlobAccess implements BatchBlobAccess.
+type metricsBatchBlobAccess[T any] struct {
+	*metricsBlobAccess[T]
+	batchBlobAccess BatchBlobAccess[T]
+}
+
+// getBatchCode returns the status code that is reported for a batch as
+// a whole: that of the first object that failed.
+func getBatchCode(errs []error) codes.Code {
+	for _, err := range errs {
+		if err != nil {
+			return status.Code(err)
+		}
+	}
+	return codes.OK
+}
+
+func (ba *metricsBatchBlobAccess[T]) GetBatch(ctx context.Context, digests []digest.Digest) ([]T, []error) {
+	if len(digests) == 0 {
+		return nil, nil
+	}
+	timeStart := ba.clock.Now()
+	for _, digest := range digests {
+		ba.getBlobSizeBytes.Observe(float64(digest.GetSizeBytes()))
+	}
+	values, errs := ba.batchBlobAccess.GetBatch(ctx, digests)
+	ba.updateDurationSeconds(ba.getBatchDurationSeconds, getBatchCode(errs), timeStart)
+	return values, errs
+}
+
+func (ba *metricsBatchBlobAccess[T]) PutBatch(ctx context.Context, digests []digest.Digest, values []T) []error {
+	if len(digests) == 0 {
+		return nil
+	}
+	timeStart := ba.clock.Now()
+	for _, digest := range digests {
+		ba.putBlobSizeBytes.Observe(float64(digest.GetSizeBytes()))
+	}
+	errs := ba.batchBlobAccess.PutBatch(ctx, digests, values)
+	ba.updateDurationSeconds(ba.putBatchDurationSeconds, getBatchCode(errs), timeStart)
+	return errs
 }
